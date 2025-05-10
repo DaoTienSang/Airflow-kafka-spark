@@ -94,5 +94,38 @@ services:
       - kafka
       - zookeeper
 
+  spark:
+    build:
+      context: ../spark
+      dockerfile: |
+        FROM apache/spark-py:v3.4.0
+
+        USER root
+
+        # Cài đặt các dependency
+        RUN pip3 install pandas numpy kafka-python
+
+        # Thiết lập PYTHONPATH để tìm thấy PySpark
+        ENV PYTHONPATH="${PYTHONPATH}:/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.7-src.zip"
+
+        # Thiết lập thư mục làm việc
+        WORKDIR /app
+
+        # Sao chép mã nguồn vào container
+        COPY stock_analysis.py /app/
+    image: stock-spark-analysis
+    container_name: spark-stock-analysis
+    command: ["/opt/spark/bin/spark-submit", "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.0", "--master", "local[*]", "stock_analysis.py"]
+    depends_on:
+      - kafka
+    environment:
+      - SPARK_MASTER=local[*]
+      - SPARK_DRIVER_MEMORY=2g
+      - SPARK_EXECUTOR_MEMORY=2g
+    volumes:
+      - ../spark:/app
+    ports:
+      - "4041:4040"  # Spark UI
+
 volumes:
   postgres-db-volume:

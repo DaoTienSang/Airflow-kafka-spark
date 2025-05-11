@@ -81,6 +81,25 @@ services:
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
+  kafka-setup:
+    image: confluentinc/cp-kafka:7.0.1
+    container_name: kafka-setup
+    depends_on:
+      - kafka
+    entrypoint: [ '/bin/sh', '-c' ]
+    command: |
+      "
+      # Block until Kafka is ready
+      kafka-topics --bootstrap-server kafka:9092 --list
+      
+      echo -e 'Tạo Kafka topics...'
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic stock-topic --replication-factor 1 --partitions 1
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic stock-history-topic --replication-factor 1 --partitions 1
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic stock-processed-topic --replication-factor 1 --partitions 1
+      
+      echo -e 'Các topics đã sẵn sàng!'
+      "
+
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: kafka-ui
@@ -92,32 +111,17 @@ services:
       - KAFKA_CLUSTERS_0_ZOOKEEPER=zookeeper:2181
     depends_on:
       - kafka
-      - zookeeper
+      - kafka-setup
 
   spark:
     build:
       context: ../spark
-      dockerfile: |
-        FROM apache/spark-py:v3.4.0
-
-        USER root
-
-        # Cài đặt các dependency
-        RUN pip3 install pandas numpy kafka-python
-
-        # Thiết lập PYTHONPATH để tìm thấy PySpark
-        ENV PYTHONPATH="${PYTHONPATH}:/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.7-src.zip"
-
-        # Thiết lập thư mục làm việc
-        WORKDIR /app
-
-        # Sao chép mã nguồn vào container
-        COPY stock_analysis.py /app/
     image: stock-spark-analysis
     container_name: spark-stock-analysis
     command: ["/opt/spark/bin/spark-submit", "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.0", "--master", "local[*]", "stock_analysis.py"]
     depends_on:
       - kafka
+      - kafka-setup
     environment:
       - SPARK_MASTER=local[*]
       - SPARK_DRIVER_MEMORY=2g
@@ -126,6 +130,22 @@ services:
       - ../spark:/app
     ports:
       - "4041:4040"  # Spark UI
+      
+  streamlit:
+    build:
+      context: ../streamlit
+    image: stock-streamlit
+    container_name: streamlit-dashboard
+    depends_on:
+      - kafka
+      - spark
+    ports:
+      - "8501:8501"
+    volumes:
+      - ../streamlit:/app
+    environment:
+      - KAFKA_BROKER=kafka:9092
+      - KAFKA_TOPIC=stock-processed-topic
 
 volumes:
   postgres-db-volume:

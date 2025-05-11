@@ -1,0 +1,161 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:13
+    container_name: airflow-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    restart: always
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.0.1
+    container_name: airflow-zookeeper-1
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.0.1
+    container_name: airflow-kafka-1
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  kafka-setup:
+    image: confluentinc/cp-kafka:7.0.1
+    container_name: kafka-setup
+    depends_on:
+      - kafka
+    entrypoint: [ '/bin/sh', '-c' ]
+    command: |
+      "
+      # Block until Kafka is ready
+      kafka-topics --bootstrap-server kafka:9092 --list
+      
+      echo -e 'Tạo Kafka topics...'
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic stock-topic --replication-factor 1 --partitions 1
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic stock-history-topic --replication-factor 1 --partitions 1
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic stock-processed-topic --replication-factor 1 --partitions 1
+      
+      echo -e 'Các topics đã sẵn sàng!'
+      "
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8180:8080"
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=stock-cluster
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
+      - KAFKA_CLUSTERS_0_ZOOKEEPER=zookeeper:2181
+    depends_on:
+      - kafka
+      - kafka-setup
+
+  # Sử dụng các image có sẵn thay vì build từ Dockerfile duy nhất
+  airflow-webserver:
+    image: apache/airflow:2.8.1-python3.10
+    container_name: airflow-webserver
+    depends_on:
+      - postgres
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__WEBSERVER__SECRET_KEY: 9fTV3z34RmPnXZBLwPDsx8XkTDnxmHkesJ1ECmTuuQo
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/requirements.txt:/opt/airflow/requirements.txt
+    command: >
+      bash -c "pip install -r /opt/airflow/requirements.txt &&
+      airflow webserver"
+    user: "50000:0"
+
+  airflow-scheduler:
+    image: apache/airflow:2.8.1-python3.10
+    container_name: airflow-scheduler
+    depends_on:
+      - airflow-webserver
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__WEBSERVER__SECRET_KEY: 9fTV3z34RmPnXZBLwPDsx8XkTDnxmHkesJ1ECmTuuQo
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/requirements.txt:/opt/airflow/requirements.txt
+    command: >
+      bash -c "pip install -r /opt/airflow/requirements.txt &&
+      airflow scheduler"
+    user: "50000:0"
+
+  airflow-init:
+    image: apache/airflow:2.8.1-python3.10
+    container_name: airflow-init
+    depends_on:
+      - postgres
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__WEBSERVER__SECRET_KEY: 9fTV3z34RmPnXZBLwPDsx8XkTDnxmHkesJ1ECmTuuQo
+    volumes:
+      - ./airflow/requirements.txt:/opt/airflow/requirements.txt
+    entrypoint: /bin/bash
+    command: -c "pip install -r /opt/airflow/requirements.txt && airflow db migrate && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com"
+    user: "50000:0"
+      
+  spark:
+    image: bitnami/spark:3.5.0
+    container_name: spark-stock-analysis
+    depends_on:
+      - kafka
+      - kafka-setup
+    environment:
+      - SPARK_MODE=master
+      - SPARK_MASTER_URL=spark://spark:7077
+      - SPARK_DRIVER_MEMORY=4g
+      - SPARK_EXECUTOR_MEMORY=4g
+    volumes:
+      - ./spark:/opt/app
+    ports:
+      - "4040:4040"
+    command: /bin/bash -c "cd /opt/app && pip install kafka-python numpy pandas pyarrow finplot && spark-submit --master local[*] --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 /opt/app/stock_analysis.py"
+      
+  streamlit:
+    image: python:3.9-slim
+    container_name: streamlit-dashboard
+    depends_on:
+      - kafka
+      - spark
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./streamlit:/app
+    environment:
+      - KAFKA_BROKER=kafka:9092
+      - KAFKA_TOPIC=stock-processed-topic
+    command: >
+      bash -c "cd /app && 
+      pip install streamlit==1.29.0 pandas==2.0.3 numpy==1.24.3 matplotlib==3.7.2 plotly==5.18.0 kafka-python==2.0.2 seaborn==0.12.2 &&
+      streamlit run app.py --server.port=8501 --server.address=0.0.0.0"
+
+volumes:
+  postgres-db-volume: 

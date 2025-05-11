@@ -124,7 +124,7 @@ default_args = {
     'owner': 'airflow',
     'retries': 1,
     'retry_delay': timedelta(minutes=2),
-    'start_date': datetime(2025, 4, 17),
+    'start_date': datetime(2023, 5, 1),
 }
 
 with DAG(
